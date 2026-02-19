@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PHL 311 Quick Report</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: { extend: { colors: { philly: { blue: '#2176d2', dark: '#0f4d90', yellow: '#f3c613' }}}}
+};
+</script>
+<style>
+html { -webkit-tap-highlight-color: transparent; }
+body { margin: 0; min-height: 100vh; font-family: system-ui, -apple-system, sans-serif; }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-900 antialiased">
+<div id="root"></div>
+<script>
+const { useState, useCallback, createElement: h } = React;
+const CATEGORIES = {
+  pothole: {
+    id:'pothole', name:'Pothole', icon:'\u{1F573}\uFE0F', description:'Street damage, cracks, cave-ins', sfName:'pothole',
+    fields: [
+      {key:'defectType',label:'Defect Type',type:'select',required:true,options:['Crack','Depression','Hole','Push-Up']},
+      {key:'gasEscaping',label:'Gas Escaping',type:'yesno',required:true},
+      {key:'runningWater',label:'Running Water',type:'yesno',required:true},
+      {key:'onInterstate',label:'On Interstate Highway',type:'yesno',required:true},
+      {key:'utilityWorkRecent',label:'Recent Utility Work',type:'yesno',required:true},
+      {key:'drivingOrParking',label:'Driving or Parking Lane',type:'select',required:true,options:['Driving','Parking']},
+      {key:'shape',label:'Shape',type:'select',required:true,options:['Round','Rectangular','Irregular']},
+      {key:'inBikeLane',label:'In Bike Lane',type:'yesno',required:true},
+      {key:'description',label:'Description',type:'textarea',required:true},
+    ]
+  },
+  litter: {
+    id:'litter', name:'Illegal Dumping / Litter', icon:'\u{1F5D1}\uFE0F', description:'Trash, dumped materials, debris', sfName:'illegal-dumping',
+    fields: [
+      {key:'householdHazardous',label:'Household Hazardous Waste',type:'yesno',required:true},
+      {key:'commercialHazardous',label:'Commercial Hazardous',type:'yesno',required:true},
+      {key:'trashLocation',label:'Trash Location',type:'select',required:true,options:['Street','Sidewalk','Vacant Lot']},
+      {key:'largeCrew',label:'Heavy Machinery Needed',type:'yesno',required:true},
+      {key:'conditionOfMaterials',label:'Condition',type:'select',required:true,options:['Scattered','Piled','Bagged','Contained']},
+      {key:'bagCount',label:'Bag Count',type:'number',required:true},
+      {key:'trashInBikeLane',label:'In Bike Lane',type:'yesno',required:true},
+      {key:'materialTypes',label:'Material Types',type:'multiselect',required:true,options:['Construction','Appliances','TVs/Monitors','Mattress/Furniture','Tires','Other']},
+      {key:'description',label:'Description',type:'textarea',required:true},
+    ]
+  },
+  graffiti: {
+    id:'graffiti', name:'Graffiti Removal', icon:'\u{1F3A8}', description:'Unwanted graffiti on property', sfName:'graffiti-removal',
+    fields: [
+      {key:'surfaceType',label:'Surface Type',type:'select',required:true,options:['Brick','Concrete/Cinder Block','Metal','Stone','Stucco','Wood','Other']},
+      {key:'paintedSurface',label:'Already Painted',type:'yesno',required:true},
+      {key:'paintColor',label:'Surface Color',type:'select',required:true,options:['White','Beige/Tan','Gray','Brown','Red/Brick','Other']},
+      {key:'floor',label:'Floor',type:'select',required:true,options:['1st Floor','2nd Floor','3rd Floor','Other']},
+      {key:'propertyType',label:'Property Type',type:'select',required:true,options:['Residential','Commercial','Government','Vacant','Other']},
+      {key:'locationOnProperty',label:'Location',type:'select',required:true,options:['Front','Side','Rear','Fence/Wall','Other']},
+      {key:'propertyOwner',label:'Are You the Owner',type:'select',required:true,options:['Yes','No','Unknown']},
+      {key:'description',label:'Description',type:'textarea',required:true},
+    ]
+  },
+  sidewalk: {
+    id:'sidewalk', name:'Dangerous Sidewalk', icon:'\u{1F6B6}', description:'Broken, raised, hazardous sidewalks', sfName:'dangerous-sidewalk',
+    fields: [
+      {key:'sidewalkCurbProblem',label:'Problem Type',type:'select',required:true,options:['Broken Sidewalk','Raised Sidewalk','Broken Curb','Missing Sidewalk','Trip Hazard','Other']},
+      {key:'intersectionRamp',label:'Intersection Ramp',type:'select',required:false,options:['Yes - Missing','Yes - Damaged','No']},
+      {key:'description',label:'Description',type:'textarea',required:true},
+    ]
+  }
+};
+const DEMO = {
+  pothole: { defectType:'Hole', shape:'Irregular', drivingOrParking:'Driving', gasEscaping:false, runningWater:false, inBikeLane:false, onInterstate:false, utilityWorkRecent:false, description:'Moderate pothole in driving lane, approximately 12x8 inches. No visible water or gas.' },
+  litter: { materialTypes:['Other'], conditionOfMaterials:'Scattered', bagCount:0, householdHazardous:false, commercialHazardous:false, largeCrew:false, trashLocation:'Sidewalk', trashInBikeLane:false, description:'Scattered litter and debris on sidewalk.' },
+  graffiti: { surfaceType:'Brick', paintedSurface:false, paintColor:'Red/Brick', floor:'1st Floor', propertyType:'Commercial', locationOnProperty:'Side', description:'Spray paint graffiti on brick wall.' },
+  sidewalk: { sidewalkCurbProblem:'Raised Sidewalk', intersectionRamp:'No', description:'Raised sidewalk section creating trip hazard, approximately 2 inch difference.' }
+};
+function FormField({field, value, onChange}) {
+  const {key, label, type, options, required} = field;
+  const lbl = h('label', {className:'block text-xs font-medium text-slate-600 mb-1'}, label, required && h('span',{className:'text-red-400'},' *'));
+  if (type === 'yesno') {
+    return h('div', null, lbl, h('div', {className:'flex gap-2'}, ['Yes','No'].map(opt =>
+      h('button', {key:opt, onClick:()=>onChange(opt==='Yes'),
+        className:'flex-1 py-1.5 rounded-lg text-sm font-medium border transition-colors '+
+          ((opt==='Yes'?(value===true):(value===false))?'bg-philly-blue text-white border-philly-blue':'bg-white text-slate-600 border-slate-300 hover:border-slate-400')
+      }, opt))));
+  }
+  if (type === 'select') {
+    return h('div', null, lbl, h('select', {value:value||'', onChange:e=>onChange(e.target.value),
+      className:'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white'},
+      h('option',{value:''},'Select...'), options.map(o => h('option',{key:o,value:o},o))));
+  }
+  if (type === 'multiselect') {
+    const sel = Array.isArray(value)?value:[];
+    return h('div', null, lbl, h('div', {className:'flex flex-wrap gap-1.5'}, options.map(o =>
+      h('button', {key:o, onClick:()=>onChange(sel.includes(o)?sel.filter(s=>s!==o):[...sel,o]),
+        className:'px-2.5 py-1 rounded-full text-xs font-medium border transition-colors '+(sel.includes(o)?'bg-philly-blue text-white border-philly-blue':'bg-white text-slate-600 border-slate-300')
+      }, o))));
+  }
+  if (type === 'textarea') return h('div', null, lbl, h('textarea', {value:value||'', onChange:e=>onChange(e.target.value), rows:3, className:'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm resize-y', placeholder:'Describe the issue...'}));
+  if (type === 'number') return h('div', null, lbl, h('input', {type:'number', min:0, value:value!=null?value:'', onChange:e=>onChange(parseInt(e.target.value)||0), className:'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm'}));
+  return h('div', null, lbl, h('input', {type:'text', value:value||'', onChange:e=>onChange(e.target.value), className:'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm'}));
+}
+function App() {
+  const [step, setStep] = useState('category');
+  const [category, setCategory] = useState(null);
+  const [photoUrl, setPhotoUrl] = useState(null);
+  const [address, setAddress] = useState(null);
+  const [formData, setFormData] = useState({});
+  function selectCategory(id) { setCategory(id); setStep('capture'); }
+  function handleCapture() {
+    setPhotoUrl('data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect fill="#e2e8f0" width="400" height="300"/><text x="200" y="150" text-anchor="middle" fill="#94a3b8" font-size="14">Photo would appear here</text></svg>'));
+    setAddress({address:'1500 MARKET ST', zipCode:'19102'});
+    setFormData({...DEMO[category]});
+    setStep('review');
+  }
+  function reset() { setStep('category'); setCategory(null); setPhotoUrl(null); setAddress(null); setFormData({}); }
+  const cat = category ? CATEGORIES[category] : null;
+  const header = h('header', {className:'bg-philly-dark text-white px-4 py-3 flex items-center justify-between sticky top-0 z-10'},
+    h('div', {className:'flex items-center gap-2'},
+      step !== 'category' && h('button', {onClick:()=>{ const m={capture:'category',review:'capture',submit:'review'}; setStep(m[step]||'category'); }, className:'p-1 -ml-1 hover:bg-white/10 rounded'}, String.fromCharCode(8592)),
+      h('h1', {className:'font-bold text-lg'}, 'PHL 311')),
+    h('span', {className:'text-xs text-white/60 uppercase tracking-wide'}, step==='category'?'':step));
+  if (step === 'category') {
+    return h('div', {className:'max-w-lg mx-auto min-h-screen flex flex-col'}, header,
+      h('main', {className:'flex-1 p-4'},
+        h('h2', {className:'text-xl font-bold mb-1'}, 'What do you want to report?'),
+        h('p', {className:'text-slate-500 text-sm mb-4'}, 'Take a photo and we will help fill out the 311 form.'),
+        h('div', {className:'grid grid-cols-2 gap-3'}, Object.values(CATEGORIES).map(c =>
+          h('button', {key:c.id, onClick:()=>selectCategory(c.id), className:'bg-white rounded-xl p-4 shadow-sm border border-slate-200 hover:border-philly-blue hover:shadow-md transition-all text-left flex flex-col gap-2 active:scale-[0.98]'},
+            h('span',{className:'text-3xl'},c.icon), h('span',{className:'font-semibold text-sm'},c.name), h('span',{className:'text-xs text-slate-500'},c.description))))),
+      h('footer', {className:'text-center text-xs text-slate-400 py-2'}, 'Not affiliated with the City of Philadelphia'));
+  }
+  if (step === 'capture') {
+    return h('div', {className:'max-w-lg mx-auto min-h-screen flex flex-col'}, header,
+      h('main', {className:'flex-1 p-4 flex flex-col items-center gap-4'},
+        h('div', {className:'text-center'}, h('span',{className:'text-4xl'},cat.icon), h('h2',{className:'text-lg font-bold mt-2'},'Report '+cat.name), h('p',{className:'text-sm text-slate-500'},'Take a photo of the issue')),
+        h('div', {className:'w-full max-w-sm aspect-[4/3] bg-slate-200 rounded-xl flex items-center justify-center'}, h('span',{className:'text-5xl text-slate-400'},'\u{1F4F7}')),
+        h('button', {onClick:handleCapture, className:'bg-philly-blue text-white font-semibold py-3 px-8 rounded-full shadow-lg hover:bg-philly-dark transition-colors active:scale-[0.97]'}, '\u{1F4F8} Take Photo (Demo)')));
+  }
+  if (step === 'review') {
+    const missing = cat.fields.filter(f=>f.required && !formData[f.key] && formData[f.key]!==false && formData[f.key]!==0).map(f=>f.label);
+    const canSubmit = missing.length === 0;
+    return h('div', {className:'max-w-lg mx-auto min-h-screen flex flex-col'}, header,
+      h('main', {className:'flex-1 p-4 space-y-4'},
+        photoUrl && h('img', {src:photoUrl, className:'w-full rounded-xl shadow max-h-48 object-cover'}),
+        h('div', {className:'bg-white rounded-xl p-4 shadow-sm border border-slate-200'},
+          h('h3', {className:'font-semibold text-sm mb-2'}, '\u{1F4CD} Location'),
+          address ? h('div', null, h('p',{className:'font-medium'},address.address), h('p',{className:'text-xs text-slate-500'},'ZIP: '+address.zipCode)) : h('p',{className:'text-sm text-slate-500'},'No address')),
+        h('div', {className:'bg-white rounded-xl p-4 shadow-sm border border-slate-200 space-y-3'},
+          h('h3', {className:'font-semibold text-sm'}, cat.name + ' Details'),
+          cat.fields.map(f => h(FormField, {key:f.key, field:f, value:formData[f.key], onChange:v=>setFormData(d=>({...d,[f.key]:v}))}))),
+        h('p', {className:'text-xs text-slate-400 text-center'}, 'Fields pre-filled by AI — please review'),
+        h('button', {onClick:()=>setStep('submit'), disabled:!canSubmit,
+          className:'w-full py-3 rounded-full font-semibold text-white shadow-lg transition-all '+(canSubmit?'bg-philly-blue hover:bg-philly-dark active:scale-[0.98]':'bg-slate-300 cursor-not-allowed')},
+          canSubmit ? 'Continue to Submit' : 'Missing: '+missing.slice(0,2).join(', ')+(missing.length>2?'...':''))));
+  }
+  if (step === 'submit') {
+    const sfUrl = 'https://philly311.my.site.com/Customer/s/useraddressinput?Name='+cat.sfName;
+    return h('div', {className:'max-w-lg mx-auto min-h-screen flex flex-col'}, header,
+      h('main', {className:'flex-1 p-4 space-y-4'},
+        h('div', {className:'text-center'}, h('div',{className:'text-4xl mb-2'},'\u{1F4CB}'), h('h2',{className:'text-lg font-bold'},'Ready to Submit'), h('p',{className:'text-sm text-slate-500'},'We will open the Philly311 form. Copy your details below.')),
+        h('div', {className:'bg-white rounded-xl p-4 shadow-sm border border-slate-200'},
+          h('h3',{className:'font-semibold text-sm mb-2'},'Report Summary'),
+          address && h('div',{className:'mb-2 pb-2 border-b border-slate-100'}, h('p',{className:'text-xs text-slate-500'},'Address'), h('p',{className:'font-medium text-sm'},address.address)),
+          h('div',{className:'space-y-1.5 text-sm'}, cat.fields.filter(f=>formData[f.key]!=null&&formData[f.key]!=='').map(f=>
+            h('div',{key:f.key,className:'flex gap-2'}, h('span',{className:'text-slate-500 text-xs min-w-[100px]'},f.label+':'),
+              h('span',{className:'text-xs font-medium'}, typeof formData[f.key]==='boolean'?(formData[f.key]?'Yes':'No'): Array.isArray(formData[f.key])?formData[f.key].join(', '): String(formData[f.key])))))),
+        h('div',{className:'bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2'},
+          h('span',{className:'text-amber-500 text-lg'},'\u{1F4F8}'),
+          h('div',{className:'text-xs text-amber-800'}, h('p',{className:'font-medium'},'Remember to upload your photo'), h('p',null,'The Philly311 form has a file upload at the bottom.'))),
+        h('a', {href:sfUrl, target:'_blank', className:'block w-full py-3 bg-philly-blue text-white font-semibold rounded-full shadow-lg hover:bg-philly-dark text-center'}, 'Open Philly311 Form \u2197'),
+        h('button', {onClick:reset, className:'w-full py-2 text-sm text-slate-500 hover:text-slate-700'}, 'Submit another report')));
+  }
+  return null;
+}
+ReactDOM.createRoot(document.getElementById('root')).render(h(App));
+</script>
+</body>
+</html>
