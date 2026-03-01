@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>PHL 311 Quick Report</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
@@ -14,13 +16,174 @@ tailwind.config = {
 </script>
 <style>
 html { -webkit-tap-highlight-color: transparent; }
-body { margin: 0; min-height: 100vh; font-family: system-ui, -apple-system, sans-serif; }
+body { margin: 0; min-height: 100vh; min-height: 100dvh; font-family: system-ui, -apple-system, sans-serif; }
+.spinner { border: 3px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; width: 20px; height: 20px; animation: spin 0.8s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body class="bg-slate-50 text-slate-900 antialiased">
 <div id="root"></div>
 <script>
-const { useState, useCallback, createElement: h } = React;
+const { useState, useCallback, useRef, useEffect, createElement: h } = React;
+
+// -- Minimal EXIF GPS Parser (pure JS, no dependencies) --
+function readExifGPS(arrayBuffer) {
+  try {
+    const view = new DataView(arrayBuffer);
+    if (view.getUint16(0) !== 0xFFD8) return null;
+    let offset = 2;
+    while (offset < view.byteLength - 1) {
+      const marker = view.getUint16(offset);
+      if (marker === 0xFFE1) {
+        const length = view.getUint16(offset + 2);
+        return parseExif(arrayBuffer, offset + 4, length - 2);
+      }
+      if ((marker & 0xFF00) !== 0xFF00) break;
+      offset += 2 + view.getUint16(offset + 2);
+    }
+  } catch(e) { console.log('EXIF parse error:', e); }
+  return null;
+}
+
+function parseExif(buffer, start, length) {
+  const view = new DataView(buffer, start, length);
+  if (view.getUint32(0) !== 0x45786966 || view.getUint16(4) !== 0) return null;
+  const tiffStart = start + 6;
+  const tiff = new DataView(buffer, tiffStart);
+  const le = tiff.getUint16(0) === 0x4949;
+  const g = (o, s) => le ? (s === 2 ? tiff.getUint16(o, true) : tiff.getUint32(o, true)) : (s === 2 ? tiff.getUint16(o) : tiff.getUint32(o));
+  let ifdOffset = g(4, 4);
+  let gpsOffset = findTag(tiff, ifdOffset, 0x8825, g);
+  if (!gpsOffset) return null;
+  gpsOffset = g(gpsOffset + 8, 4);
+  const lat = readGPSCoord(tiff, gpsOffset, 0x0002, g);
+  const lng = readGPSCoord(tiff, gpsOffset, 0x0004, g);
+  const latRef = readGPSString(tiff, gpsOffset, 0x0001, g);
+  const lngRef = readGPSString(tiff, gpsOffset, 0x0003, g);
+  if (lat === null || lng === null) return null;
+  return { lat: latRef === 'S' ? -lat : lat, lng: lngRef === 'W' ? -lng : lng };
+}
+
+function findTag(tiff, ifdOffset, targetTag, g) {
+  const count = g(ifdOffset, 2);
+  for (let i = 0; i < count; i++) {
+    const entryOffset = ifdOffset + 2 + i * 12;
+    if (g(entryOffset, 2) === targetTag) return entryOffset;
+  }
+  return null;
+}
+
+function readGPSCoord(tiff, gpsIfd, tag, g) {
+  const entry = findTag(tiff, gpsIfd, tag, g);
+  if (!entry) return null;
+  const offset = g(entry + 8, 4);
+  const d = g(offset, 4) / g(offset + 4, 4);
+  const m = g(offset + 8, 4) / g(offset + 12, 4);
+  const s = g(offset + 16, 4) / g(offset + 20, 4);
+  return d + m / 60 + s / 3600;
+}
+
+function readGPSString(tiff, gpsIfd, tag, g) {
+  const entry = findTag(tiff, gpsIfd, tag, g);
+  if (!entry) return null;
+  const count = g(entry + 4, 4);
+  if (count <= 4) return String.fromCharCode((g(entry + 8, 4) >> 24) & 0xFF);
+  const offset = g(entry + 8, 4);
+  return String.fromCharCode(new Uint8Array(tiff.buffer, tiff.byteOffset + offset, 1)[0]);
+}
+
+// -- Camera / Photo capture --
+function capturePhoto() {
+  return new Promise((resolve, reject) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.capture = 'environment';
+    input.onchange = async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return reject(new Error('No file selected'));
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const gps = readExifGPS(arrayBuffer);
+        const dataUrl = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(file); });
+        resolve({ file, dataUrl, gps });
+      } catch(err) {
+        const dataUrl = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(file); });
+        resolve({ file, dataUrl, gps: null });
+      }
+    };
+    const onFocus = () => { setTimeout(() => { if (!input.files?.length) reject(new Error('Cancelled')); window.removeEventListener('focus', onFocus); }, 500); };
+    window.addEventListener('focus', onFocus);
+    input.click();
+  });
+}
+
+function getCurrentLocation() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error('Geolocation not supported'));
+    navigator.geolocation.getCurrentPosition(
+      pos => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      err => reject(err),
+      { enableHighAccuracy: true, timeout: 15000 }
+    );
+  });
+}
+
+// -- Philadelphia AIS API --
+async function reverseGeocode(lat, lng) {
+  try {
+    const res = await fetch('https://api.phila.gov/ais/v1/reverse_geocode/' + lng + ',' + lat);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const f = data.features?.[0];
+    if (!f) return null;
+    return { address: f.properties.street_address, zipCode: f.properties.zip_code };
+  } catch(e) { console.error('AIS error:', e); return null; }
+}
+
+async function searchAddress(query) {
+  try {
+    const res = await fetch('https://api.phila.gov/ais/v1/search/' + encodeURIComponent(query));
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.features || []).slice(0, 5).map(f => ({
+      address: f.properties.street_address, zipCode: f.properties.zip_code
+    }));
+  } catch { return []; }
+}
+
+// -- Claude API (optional) --
+async function analyzeWithClaude(dataUrl, categoryId, apiKey) {
+  const cat = CATEGORIES[categoryId];
+  if (!apiKey || !cat.aiPrompt) return null;
+  const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+  const mediaType = dataUrl.match(/^data:(image\/\w+);/)?.[1] || 'image/jpeg';
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5-20250514',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+          { type: 'text', text: cat.aiPrompt + '\n\nRespond with ONLY valid JSON, no markdown fences.' }
+        ]}]
+      })
+    });
+    if (!res.ok) return null;
+    const result = await res.json();
+    const text = result.content?.[0]?.text || '{}';
+    try { return JSON.parse(text); } catch { const m = text.match(/\{[\s\S]*\}/); return m ? JSON.parse(m[0]) : null; }
+  } catch(e) { console.error('Claude API error:', e); return null; }
+}
+
+// -- Categories --
 const CATEGORIES = {
   pothole: {
     id:'pothole', name:'Pothole', icon:'\u{1F573}\uFE0F', description:'Street damage, cracks, cave-ins', sfName:'pothole',
@@ -34,12 +197,14 @@ const CATEGORIES = {
       {key:'shape',label:'Shape',type:'select',required:true,options:['Round','Rectangular','Irregular']},
       {key:'inBikeLane',label:'In Bike Lane',type:'yesno',required:true},
       {key:'description',label:'Description',type:'textarea',required:true},
-    ]
+    ],
+    aiPrompt: 'Analyze this photo of street damage in Philadelphia. Return JSON with: defectType (Crack/Depression/Hole/Push-Up), shape (Round/Rectangular/Irregular), drivingOrParking (Driving/Parking), gasEscaping (bool), runningWater (bool), inBikeLane (bool), onInterstate (bool), utilityWorkRecent (bool), description (2-3 sentences for the city).',
+    demo: { defectType:'Hole', shape:'Irregular', drivingOrParking:'Driving', gasEscaping:false, runningWater:false, inBikeLane:false, onInterstate:false, utilityWorkRecent:false, description:'Pothole in driving lane. Please review photo and edit description.' }
   },
   litter: {
-    id:'litter', name:'Illegal Dumping / Litter', icon:'\u{1F5D1}\uFE0F', description:'Trash, dumped materials, debris', sfName:'illegal-dumping',
+    id:'litter', name:'Illegal Dumping', icon:'\u{1F5D1}\uFE0F', description:'Trash, dumped materials, debris', sfName:'illegal-dumping',
     fields: [
-      {key:'householdHazardous',label:'Household Hazardous Waste',type:'yesno',required:true},
+      {key:'householdHazardous',label:'Household Hazardous',type:'yesno',required:true},
       {key:'commercialHazardous',label:'Commercial Hazardous',type:'yesno',required:true},
       {key:'trashLocation',label:'Trash Location',type:'select',required:true,options:['Street','Sidewalk','Vacant Lot']},
       {key:'largeCrew',label:'Heavy Machinery Needed',type:'yesno',required:true},
@@ -48,7 +213,9 @@ const CATEGORIES = {
       {key:'trashInBikeLane',label:'In Bike Lane',type:'yesno',required:true},
       {key:'materialTypes',label:'Material Types',type:'multiselect',required:true,options:['Construction','Appliances','TVs/Monitors','Mattress/Furniture','Tires','Other']},
       {key:'description',label:'Description',type:'textarea',required:true},
-    ]
+    ],
+    aiPrompt: 'Analyze this photo of litter/illegal dumping in Philadelphia. Return JSON with: materialTypes (array from Construction/Appliances/TVs+Monitors/Mattress+Furniture/Tires/Other), conditionOfMaterials (Scattered/Piled/Bagged/Contained), bagCount (number), householdHazardous (bool), commercialHazardous (bool), largeCrew (bool), trashLocation (Street/Sidewalk/Vacant Lot), trashInBikeLane (bool), description (2-3 sentences).',
+    demo: { materialTypes:['Other'], conditionOfMaterials:'Scattered', bagCount:0, householdHazardous:false, commercialHazardous:false, largeCrew:false, trashLocation:'Sidewalk', trashInBikeLane:false, description:'Litter on sidewalk. Please review photo and edit description.' }
   },
   graffiti: {
     id:'graffiti', name:'Graffiti Removal', icon:'\u{1F3A8}', description:'Unwanted graffiti on property', sfName:'graffiti-removal',
@@ -61,7 +228,9 @@ const CATEGORIES = {
       {key:'locationOnProperty',label:'Location',type:'select',required:true,options:['Front','Side','Rear','Fence/Wall','Other']},
       {key:'propertyOwner',label:'Are You the Owner',type:'select',required:true,options:['Yes','No','Unknown']},
       {key:'description',label:'Description',type:'textarea',required:true},
-    ]
+    ],
+    aiPrompt: 'Analyze this photo of graffiti in Philadelphia. Return JSON with: surfaceType, paintedSurface (bool), paintColor, floor, propertyType, locationOnProperty, description (2-3 sentences).',
+    demo: { surfaceType:'Brick', paintedSurface:false, paintColor:'Red/Brick', floor:'1st Floor', propertyType:'Commercial', locationOnProperty:'Side', propertyOwner:'No', description:'Graffiti on brick wall. Please review photo and edit description.' }
   },
   sidewalk: {
     id:'sidewalk', name:'Dangerous Sidewalk', icon:'\u{1F6B6}', description:'Broken, raised, hazardous sidewalks', sfName:'dangerous-sidewalk',
@@ -69,114 +238,360 @@ const CATEGORIES = {
       {key:'sidewalkCurbProblem',label:'Problem Type',type:'select',required:true,options:['Broken Sidewalk','Raised Sidewalk','Broken Curb','Missing Sidewalk','Trip Hazard','Other']},
       {key:'intersectionRamp',label:'Intersection Ramp',type:'select',required:false,options:['Yes - Missing','Yes - Damaged','No']},
       {key:'description',label:'Description',type:'textarea',required:true},
-    ]
+    ],
+    aiPrompt: 'Analyze this photo of a sidewalk issue in Philadelphia. Return JSON with: sidewalkCurbProblem, intersectionRamp, description (2-3 sentences).',
+    demo: { sidewalkCurbProblem:'Raised Sidewalk', intersectionRamp:'No', description:'Sidewalk issue. Please review photo and edit description.' }
   }
 };
-const DEMO = {
-  pothole: { defectType:'Hole', shape:'Irregular', drivingOrParking:'Driving', gasEscaping:false, runningWater:false, inBikeLane:false, onInterstate:false, utilityWorkRecent:false, description:'Moderate pothole in driving lane, approximately 12x8 inches. No visible water or gas.' },
-  litter: { materialTypes:['Other'], conditionOfMaterials:'Scattered', bagCount:0, householdHazardous:false, commercialHazardous:false, largeCrew:false, trashLocation:'Sidewalk', trashInBikeLane:false, description:'Scattered litter and debris on sidewalk.' },
-  graffiti: { surfaceType:'Brick', paintedSurface:false, paintColor:'Red/Brick', floor:'1st Floor', propertyType:'Commercial', locationOnProperty:'Side', description:'Spray paint graffiti on brick wall.' },
-  sidewalk: { sidewalkCurbProblem:'Raised Sidewalk', intersectionRamp:'No', description:'Raised sidewalk section creating trip hazard, approximately 2 inch difference.' }
-};
+
+// -- FormField component --
 function FormField({field, value, onChange}) {
   const {key, label, type, options, required} = field;
   const lbl = h('label', {className:'block text-xs font-medium text-slate-600 mb-1'}, label, required && h('span',{className:'text-red-400'},' *'));
   if (type === 'yesno') {
-    return h('div', null, lbl, h('div', {className:'flex gap-2'}, ['Yes','No'].map(opt =>
-      h('button', {key:opt, onClick:()=>onChange(opt==='Yes'),
-        className:'flex-1 py-1.5 rounded-lg text-sm font-medium border transition-colors '+
-          ((opt==='Yes'?(value===true):(value===false))?'bg-philly-blue text-white border-philly-blue':'bg-white text-slate-600 border-slate-300 hover:border-slate-400')
-      }, opt))));
+    return h('div', null, lbl,
+      h('div', {className:'flex gap-2'}, ['Yes','No'].map(opt =>
+        h('button', {key:opt, type:'button', onClick:()=>onChange(opt==='Yes'),
+          className:'flex-1 py-1.5 rounded-lg text-sm font-medium border transition-colors '+(
+            (opt==='Yes'?(value===true):(value===false))
+            ?'bg-philly-blue text-white border-philly-blue':'bg-white text-slate-600 border-slate-300')
+        }, opt)
+      ))
+    );
   }
   if (type === 'select') {
-    return h('div', null, lbl, h('select', {value:value||'', onChange:e=>onChange(e.target.value),
-      className:'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white'},
-      h('option',{value:''},'Select...'), options.map(o => h('option',{key:o,value:o},o))));
+    return h('div', null, lbl,
+      h('select', {value:value||'', onChange:e=>onChange(e.target.value),
+        className:'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white'},
+        h('option',{value:''},'Select...'),
+        options.map(o => h('option',{key:o,value:o},o))
+      )
+    );
   }
   if (type === 'multiselect') {
     const sel = Array.isArray(value)?value:[];
-    return h('div', null, lbl, h('div', {className:'flex flex-wrap gap-1.5'}, options.map(o =>
-      h('button', {key:o, onClick:()=>onChange(sel.includes(o)?sel.filter(s=>s!==o):[...sel,o]),
-        className:'px-2.5 py-1 rounded-full text-xs font-medium border transition-colors '+(sel.includes(o)?'bg-philly-blue text-white border-philly-blue':'bg-white text-slate-600 border-slate-300')
-      }, o))));
+    return h('div', null, lbl,
+      h('div', {className:'flex flex-wrap gap-1.5'}, options.map(o =>
+        h('button', {key:o, type:'button', onClick:()=>onChange(sel.includes(o)?sel.filter(s=>s!==o):[...sel,o]),
+          className:'px-2.5 py-1 rounded-full text-xs font-medium border transition-colors '+(
+            sel.includes(o)?'bg-philly-blue text-white border-philly-blue':'bg-white text-slate-600 border-slate-300')
+        }, o)
+      ))
+    );
   }
-  if (type === 'textarea') return h('div', null, lbl, h('textarea', {value:value||'', onChange:e=>onChange(e.target.value), rows:3, className:'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm resize-y', placeholder:'Describe the issue...'}));
-  if (type === 'number') return h('div', null, lbl, h('input', {type:'number', min:0, value:value!=null?value:'', onChange:e=>onChange(parseInt(e.target.value)||0), className:'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm'}));
-  return h('div', null, lbl, h('input', {type:'text', value:value||'', onChange:e=>onChange(e.target.value), className:'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm'}));
+  if (type === 'textarea') {
+    return h('div', null, lbl,
+      h('textarea', {value:value||'', onChange:e=>onChange(e.target.value), rows:3,
+        className:'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm resize-y',
+        placeholder:'Describe the issue...'})
+    );
+  }
+  if (type === 'number') {
+    return h('div', null, lbl,
+      h('input', {type:'number', inputMode:'numeric', min:0, value:value??'', onChange:e=>onChange(parseInt(e.target.value)||0),
+        className:'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm'})
+    );
+  }
+  return h('div', null, lbl,
+    h('input', {type:'text', value:value||'', onChange:e=>onChange(e.target.value),
+      className:'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm'})
+  );
 }
+
+// -- Main App --
 function App() {
   const [step, setStep] = useState('category');
   const [category, setCategory] = useState(null);
   const [photoUrl, setPhotoUrl] = useState(null);
   const [address, setAddress] = useState(null);
+  const [gps, setGps] = useState(null);
   const [formData, setFormData] = useState({});
-  function selectCategory(id) { setCategory(id); setStep('capture'); }
-  function handleCapture() {
-    setPhotoUrl('data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect fill="#e2e8f0" width="400" height="300"/><text x="200" y="150" text-anchor="middle" fill="#94a3b8" font-size="14">Photo would appear here</text></svg>'));
-    setAddress({address:'1500 MARKET ST', zipCode:'19102'});
-    setFormData({...DEMO[category]});
-    setStep('review');
+  const [loading, setLoading] = useState(false);
+  const [loadingMsg, setLoadingMsg] = useState('');
+  const [error, setError] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [apiKey, setApiKey] = useState('');
+  const [addressSearch, setAddressSearch] = useState('');
+  const [addressResults, setAddressResults] = useState([]);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    try { const k = localStorage.getItem('phl311_api_key'); if (k) setApiKey(k); } catch {}
+  }, []);
+
+  function saveApiKey(key) {
+    setApiKey(key);
+    try { localStorage.setItem('phl311_api_key', key); } catch {}
   }
-  function reset() { setStep('category'); setCategory(null); setPhotoUrl(null); setAddress(null); setFormData({}); }
+
+  function selectCategory(id) {
+    setCategory(id);
+    setStep('capture');
+    setError(null);
+  }
+
+  async function handleCapture() {
+    setLoading(true);
+    setError(null);
+    setLoadingMsg('Opening camera...');
+    try {
+      const photo = await capturePhoto();
+      setPhotoUrl(photo.dataUrl);
+      let loc = photo.gps;
+      if (loc) {
+        setLoadingMsg('Got GPS from photo, looking up address...');
+      } else {
+        setLoadingMsg('No GPS in photo, getting your location...');
+        try {
+          loc = await getCurrentLocation();
+          setLoadingMsg('Got location, looking up address...');
+        } catch(e) {
+          console.log('Geolocation failed:', e);
+          setLoadingMsg('Could not get location. You can search for an address.');
+        }
+      }
+      setGps(loc);
+      let addr = null;
+      if (loc) {
+        addr = await reverseGeocode(loc.lat, loc.lng);
+        if (addr) setLoadingMsg('Found address: ' + addr.address);
+      }
+      setAddress(addr);
+      const cat = CATEGORIES[category];
+      setLoadingMsg(apiKey ? 'Analyzing photo with AI...' : 'Pre-filling form defaults...');
+      let analysis = null;
+      if (apiKey) {
+        analysis = await analyzeWithClaude(photo.dataUrl, category, apiKey);
+      }
+      setFormData(analysis || {...cat.demo});
+      setStep('review');
+    } catch(e) {
+      if (e.message !== 'Cancelled') setError(e.message);
+    } finally {
+      setLoading(false);
+      setLoadingMsg('');
+    }
+  }
+
+  async function handleAddressSearch() {
+    if (!addressSearch.trim()) return;
+    const results = await searchAddress(addressSearch);
+    setAddressResults(results);
+  }
+
+  function buildSummary() {
+    const cat = CATEGORIES[category];
+    let lines = ['=== PHL 311 Report: ' + cat.name + ' ==='];
+    if (address) lines.push('Address: ' + address.address + (address.zipCode ? ' ' + address.zipCode : ''));
+    cat.fields.forEach(f => {
+      const v = formData[f.key];
+      if (v == null || v === '') return;
+      const display = typeof v === 'boolean' ? (v ? 'Yes' : 'No') : Array.isArray(v) ? v.join(', ') : String(v);
+      lines.push(f.label + ': ' + display);
+    });
+    return lines.join('\n');
+  }
+
+  function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true); setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {
+      const ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta);
+      setCopied(true); setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  function reset() {
+    setStep('category'); setCategory(null); setPhotoUrl(null);
+    setAddress(null); setGps(null); setFormData({});
+    setError(null); setAddressSearch(''); setAddressResults([]);
+  }
+
   const cat = category ? CATEGORIES[category] : null;
+
+  // -- Settings modal --
+  if (showSettings) {
+    return h('div', {className:'max-w-lg mx-auto min-h-screen bg-white p-4'},
+      h('div', {className:'flex items-center justify-between mb-6'},
+        h('h2', {className:'text-lg font-bold'}, 'Settings'),
+        h('button', {onClick:()=>setShowSettings(false), className:'text-2xl text-slate-400'}, '\u00D7')
+      ),
+      h('div', {className:'space-y-4'},
+        h('div', null,
+          h('label', {className:'block text-sm font-medium text-slate-700 mb-1'}, 'Claude API Key (optional)'),
+          h('p', {className:'text-xs text-slate-500 mb-2'}, 'Add your API key to enable AI photo analysis. Without it, form fields use sensible defaults that you edit manually.'),
+          h('input', {type:'password', value:apiKey, onChange:e=>saveApiKey(e.target.value),
+            placeholder:'sk-ant-...',
+            className:'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono'})
+        ),
+        apiKey && h('p', {className:'text-xs text-green-600'}, 'API key saved. Photos will be analyzed by Claude.')
+      )
+    );
+  }
+
+  // -- Header --
   const header = h('header', {className:'bg-philly-dark text-white px-4 py-3 flex items-center justify-between sticky top-0 z-10'},
     h('div', {className:'flex items-center gap-2'},
-      step !== 'category' && h('button', {onClick:()=>{ const m={capture:'category',review:'capture',submit:'review'}; setStep(m[step]||'category'); }, className:'p-1 -ml-1 hover:bg-white/10 rounded'}, String.fromCharCode(8592)),
-      h('h1', {className:'font-bold text-lg'}, 'PHL 311')),
-    h('span', {className:'text-xs text-white/60 uppercase tracking-wide'}, step==='category'?'':step));
+      step !== 'category' && h('button', {onClick:()=>{
+        if(step==='capture'){setStep('category');setError(null);}
+        if(step==='review')setStep('capture');
+        if(step==='submit')setStep('review');
+      }, className:'p-1 -ml-1 hover:bg-white/10 rounded'}, '\u2190'),
+      h('h1', {className:'font-bold text-lg'}, 'PHL 311')
+    ),
+    h('div', {className:'flex items-center gap-2'},
+      step !== 'category' && h('span', {className:'text-xs text-white/60 uppercase tracking-wide'}, step),
+      h('button', {onClick:()=>setShowSettings(true), className:'p-1 hover:bg-white/10 rounded text-white/70'}, '\u2699\uFE0F')
+    )
+  );
+
+  // -- Category Picker --
   if (step === 'category') {
     return h('div', {className:'max-w-lg mx-auto min-h-screen flex flex-col'}, header,
       h('main', {className:'flex-1 p-4'},
         h('h2', {className:'text-xl font-bold mb-1'}, 'What do you want to report?'),
         h('p', {className:'text-slate-500 text-sm mb-4'}, 'Take a photo and we will help fill out the 311 form.'),
         h('div', {className:'grid grid-cols-2 gap-3'}, Object.values(CATEGORIES).map(c =>
-          h('button', {key:c.id, onClick:()=>selectCategory(c.id), className:'bg-white rounded-xl p-4 shadow-sm border border-slate-200 hover:border-philly-blue hover:shadow-md transition-all text-left flex flex-col gap-2 active:scale-[0.98]'},
-            h('span',{className:'text-3xl'},c.icon), h('span',{className:'font-semibold text-sm'},c.name), h('span',{className:'text-xs text-slate-500'},c.description))))),
-      h('footer', {className:'text-center text-xs text-slate-400 py-2'}, 'Not affiliated with the City of Philadelphia'));
+          h('button', {key:c.id, onClick:()=>selectCategory(c.id),
+            className:'bg-white rounded-xl p-4 shadow-sm border border-slate-200 hover:border-philly-blue hover:shadow-md transition-all text-left flex flex-col gap-2 active:scale-[0.98]'},
+            h('span',{className:'text-3xl'},c.icon),
+            h('span',{className:'font-semibold text-sm'},c.name),
+            h('span',{className:'text-xs text-slate-500'},c.description)
+          )
+        ))
+      ),
+      h('footer', {className:'text-center text-xs text-slate-400 py-2'}, 'Not affiliated with the City of Philadelphia')
+    );
   }
+
+  // -- Capture Step --
   if (step === 'capture') {
     return h('div', {className:'max-w-lg mx-auto min-h-screen flex flex-col'}, header,
       h('main', {className:'flex-1 p-4 flex flex-col items-center gap-4'},
-        h('div', {className:'text-center'}, h('span',{className:'text-4xl'},cat.icon), h('h2',{className:'text-lg font-bold mt-2'},'Report '+cat.name), h('p',{className:'text-sm text-slate-500'},'Take a photo of the issue')),
-        h('div', {className:'w-full max-w-sm aspect-[4/3] bg-slate-200 rounded-xl flex items-center justify-center'}, h('span',{className:'text-5xl text-slate-400'},'\u{1F4F7}')),
-        h('button', {onClick:handleCapture, className:'bg-philly-blue text-white font-semibold py-3 px-8 rounded-full shadow-lg hover:bg-philly-dark transition-colors active:scale-[0.97]'}, '\u{1F4F8} Take Photo (Demo)')));
+        h('div', {className:'text-center'},
+          h('span',{className:'text-4xl'},cat.icon),
+          h('h2',{className:'text-lg font-bold mt-2'},'Report '+cat.name),
+          h('p',{className:'text-sm text-slate-500'},'Take a photo of the issue')
+        ),
+        photoUrl ? h('img', {src:photoUrl, className:'w-full max-w-sm rounded-xl shadow max-h-64 object-cover'})
+        : h('div', {className:'w-full max-w-sm aspect-[4/3] bg-slate-200 rounded-xl flex items-center justify-center'},
+            h('svg',{className:'w-16 h-16 text-slate-400',fill:'none',stroke:'currentColor',viewBox:'0 0 24 24'},
+              h('path',{strokeLinecap:'round',strokeLinejoin:'round',strokeWidth:1.5,d:'M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z'}),
+              h('path',{strokeLinecap:'round',strokeLinejoin:'round',strokeWidth:1.5,d:'M15 13a3 3 0 11-6 0 3 3 0 016 0z'})
+            )
+          ),
+        loading && h('div', {className:'flex flex-col items-center gap-2'},
+          h('div', {className:'spinner', style:{borderTopColor:'#2176d2', borderColor:'rgba(33,118,210,0.2)'}}),
+          h('p', {className:'text-sm text-slate-600 text-center'}, loadingMsg)
+        ),
+        error && h('div', {className:'bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700 w-full max-w-sm'}, error),
+        !loading && h('button', {onClick:handleCapture,
+          className:'bg-philly-blue text-white font-semibold py-3 px-8 rounded-full shadow-lg hover:bg-philly-dark transition-colors active:scale-[0.97] flex items-center gap-2'},
+          '\u{1F4F8} Take Photo')
+      )
+    );
   }
+
+  // -- Review Step --
   if (step === 'review') {
-    const missing = cat.fields.filter(f=>f.required && !formData[f.key] && formData[f.key]!==false && formData[f.key]!==0).map(f=>f.label);
+    const missing = cat.fields.filter(f=>f.required && (formData[f.key]==null || formData[f.key]==='') && formData[f.key]!==false && formData[f.key]!==0).map(f=>f.label);
     const canSubmit = missing.length === 0;
     return h('div', {className:'max-w-lg mx-auto min-h-screen flex flex-col'}, header,
       h('main', {className:'flex-1 p-4 space-y-4'},
         photoUrl && h('img', {src:photoUrl, className:'w-full rounded-xl shadow max-h-48 object-cover'}),
         h('div', {className:'bg-white rounded-xl p-4 shadow-sm border border-slate-200'},
-          h('h3', {className:'font-semibold text-sm mb-2'}, '\u{1F4CD} Location'),
-          address ? h('div', null, h('p',{className:'font-medium'},address.address), h('p',{className:'text-xs text-slate-500'},'ZIP: '+address.zipCode)) : h('p',{className:'text-sm text-slate-500'},'No address')),
+          h('h3', {className:'font-semibold text-sm mb-2 flex items-center gap-1'}, '\u{1F4CD} Location'),
+          address ? h('div', null,
+            h('p',{className:'font-medium'},address.address),
+            address.zipCode && h('p',{className:'text-xs text-slate-500'},'ZIP: '+address.zipCode),
+            h('button', {onClick:()=>{setAddress(null);}, className:'text-xs text-philly-blue mt-1'}, 'Change address')
+          ) : h('div', {className:'space-y-2'},
+            h('p',{className:'text-sm text-slate-500'},'No address found. Search below:'),
+            h('div', {className:'flex gap-2'},
+              h('input', {type:'text', value:addressSearch, onChange:e=>setAddressSearch(e.target.value),
+                onKeyDown:e=>{if(e.key==='Enter')handleAddressSearch();},
+                placeholder:'e.g. 1500 Market St',
+                className:'flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm'}),
+              h('button', {onClick:handleAddressSearch,
+                className:'bg-philly-blue text-white px-3 py-2 rounded-lg text-sm font-medium'}, 'Search')
+            ),
+            addressResults.length > 0 && h('div', {className:'space-y-1'},
+              addressResults.map((r,i) => h('button', {key:i, onClick:()=>{setAddress(r);setAddressResults([]);},
+                className:'block w-full text-left px-3 py-2 bg-slate-50 rounded-lg text-sm hover:bg-philly-blue/10 transition-colors'},
+                r.address + (r.zipCode ? ' ('+r.zipCode+')' : '')))
+            )
+          )
+        ),
         h('div', {className:'bg-white rounded-xl p-4 shadow-sm border border-slate-200 space-y-3'},
           h('h3', {className:'font-semibold text-sm'}, cat.name + ' Details'),
-          cat.fields.map(f => h(FormField, {key:f.key, field:f, value:formData[f.key], onChange:v=>setFormData(d=>({...d,[f.key]:v}))}))),
-        h('p', {className:'text-xs text-slate-400 text-center'}, 'Fields pre-filled by AI — please review'),
+          h('p', {className:'text-xs text-slate-400'}, apiKey ? 'AI-analyzed \u2014 please review' : 'Defaults \u2014 please review and edit'),
+          cat.fields.map(f => h(FormField, {key:f.key, field:f, value:formData[f.key],
+            onChange:v=>setFormData(d=>({...d,[f.key]:v}))}))
+        ),
         h('button', {onClick:()=>setStep('submit'), disabled:!canSubmit,
-          className:'w-full py-3 rounded-full font-semibold text-white shadow-lg transition-all '+(canSubmit?'bg-philly-blue hover:bg-philly-dark active:scale-[0.98]':'bg-slate-300 cursor-not-allowed')},
-          canSubmit ? 'Continue to Submit' : 'Missing: '+missing.slice(0,2).join(', ')+(missing.length>2?'...':''))));
+          className:'w-full py-3 rounded-full font-semibold text-white shadow-lg transition-all '+(
+            canSubmit?'bg-philly-blue hover:bg-philly-dark active:scale-[0.98]':'bg-slate-300 cursor-not-allowed')},
+          canSubmit ? 'Continue to Submit' : 'Missing: '+missing.slice(0,2).join(', ')+(missing.length>2?'...':''))
+      )
+    );
   }
+
+  // -- Submit Step --
   if (step === 'submit') {
     const sfUrl = 'https://philly311.my.site.com/Customer/s/useraddressinput?Name='+cat.sfName;
+    const summary = buildSummary();
     return h('div', {className:'max-w-lg mx-auto min-h-screen flex flex-col'}, header,
       h('main', {className:'flex-1 p-4 space-y-4'},
-        h('div', {className:'text-center'}, h('div',{className:'text-4xl mb-2'},'\u{1F4CB}'), h('h2',{className:'text-lg font-bold'},'Ready to Submit'), h('p',{className:'text-sm text-slate-500'},'We will open the Philly311 form. Copy your details below.')),
+        h('div', {className:'text-center'}, h('div',{className:'text-4xl mb-2'},'\u{1F4CB}'),
+          h('h2',{className:'text-lg font-bold'},'Ready to Submit'),
+          h('p',{className:'text-sm text-slate-500'},'The Philly311 form will ask for your address first, then the details.')
+        ),
+        address && h('div', {className:'bg-philly-blue/10 border border-philly-blue/30 rounded-xl p-3'},
+          h('p', {className:'text-xs text-philly-dark font-medium mb-1'}, 'Your address (enter this on the 311 form):'),
+          h('p', {className:'font-bold text-philly-dark text-lg'}, address.address),
+          h('button', {onClick:()=>copyToClipboard(address.address),
+            className:'mt-1 text-xs text-philly-blue font-medium'}, copied ? '\u2713 Copied!' : 'Copy address')
+        ),
         h('div', {className:'bg-white rounded-xl p-4 shadow-sm border border-slate-200'},
-          h('h3',{className:'font-semibold text-sm mb-2'},'Report Summary'),
-          address && h('div',{className:'mb-2 pb-2 border-b border-slate-100'}, h('p',{className:'text-xs text-slate-500'},'Address'), h('p',{className:'font-medium text-sm'},address.address)),
-          h('div',{className:'space-y-1.5 text-sm'}, cat.fields.filter(f=>formData[f.key]!=null&&formData[f.key]!=='').map(f=>
-            h('div',{key:f.key,className:'flex gap-2'}, h('span',{className:'text-slate-500 text-xs min-w-[100px]'},f.label+':'),
-              h('span',{className:'text-xs font-medium'}, typeof formData[f.key]==='boolean'?(formData[f.key]?'Yes':'No'): Array.isArray(formData[f.key])?formData[f.key].join(', '): String(formData[f.key])))))),
-        h('div',{className:'bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2'},
-          h('span',{className:'text-amber-500 text-lg'},'\u{1F4F8}'),
-          h('div',{className:'text-xs text-amber-800'}, h('p',{className:'font-medium'},'Remember to upload your photo'), h('p',null,'The Philly311 form has a file upload at the bottom.'))),
-        h('a', {href:sfUrl, target:'_blank', className:'block w-full py-3 bg-philly-blue text-white font-semibold rounded-full shadow-lg hover:bg-philly-dark text-center'}, 'Open Philly311 Form \u2197'),
-        h('button', {onClick:reset, className:'w-full py-2 text-sm text-slate-500 hover:text-slate-700'}, 'Submit another report')));
+          h('div', {className:'flex items-center justify-between mb-2'},
+            h('h3',{className:'font-semibold text-sm'},'Report Summary'),
+            h('button', {onClick:()=>copyToClipboard(summary),
+              className:'text-xs bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded font-medium'}, copied ? '\u2713 Copied!' : 'Copy all')
+          ),
+          h('div',{className:'space-y-1.5 text-sm'},
+            cat.fields.filter(f=>formData[f.key]!=null&&formData[f.key]!=='').map(f=>
+              h('div',{key:f.key,className:'flex gap-2'},
+                h('span',{className:'text-slate-500 text-xs min-w-[100px]'},f.label+':'),
+                h('span',{className:'text-xs font-medium'},
+                  typeof formData[f.key]==='boolean'?(formData[f.key]?'Yes':'No'):
+                  Array.isArray(formData[f.key])?formData[f.key].join(', '):
+                  String(formData[f.key]))
+              )
+            ))
+        ),
+        h('div',{className:'bg-amber-50 border border-amber-200 rounded-xl p-3 space-y-2'},
+          h('p', {className:'text-xs font-medium text-amber-800'}, 'How to submit:'),
+          h('ol', {className:'text-xs text-amber-700 space-y-1 list-decimal pl-4'},
+            h('li', null, 'Tap "Open Philly311" below'),
+            h('li', null, 'Enter your address: ', h('strong', null, address?.address || '(search on the form)')),
+            h('li', null, 'Fill in the form fields using the summary above'),
+            h('li', null, 'Upload your photo at the bottom of their form'),
+            h('li', null, 'Submit!')
+          )
+        ),
+        h('a', {href:sfUrl, target:'_blank', rel:'noopener',
+          className:'block w-full py-3 bg-philly-blue text-white font-semibold rounded-full shadow-lg hover:bg-philly-dark text-center active:scale-[0.97] transition-all'},
+          'Open Philly311 Form \u2197'),
+        h('button', {onClick:reset, className:'w-full py-2 text-sm text-slate-500 hover:text-slate-700'}, 'Submit another report')
+      )
+    );
   }
+
   return null;
 }
+
 ReactDOM.createRoot(document.getElementById('root')).render(h(App));
 </script>
 </body>
